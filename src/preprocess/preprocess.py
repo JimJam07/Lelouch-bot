@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch
 import re
 
-from ..utils import encode_score, format_time
+from src.utils.utils import encode_score, format_time
 
 class Preprocess:
     """
