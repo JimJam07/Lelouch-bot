@@ -3,101 +3,72 @@ import math
 
 MATE_SCORE = 32000  # Stockfish's mate constant
 
-def encode_score(eval_str: str) -> float:
+MATE_BASE = 10000
+
+
+def encode_score(eval_str: str | list[str]) -> float:
     """
-    Converts PGN evaluation to centipawns (white's perspective).
+    Converts PGN evaluation like '0.24', '#3', '#-2' to a float:
+    - centipawn eval (0.24) => 24.0
+    - mate eval (#3) => +9997 (10000 - 3 plies * 2)
+    - mate against (#-3) => -9997
+
     Args:
-        eval_str: PGN evaluation like "0.24", "#3", or "#-2"
+    eval_str (str): The PGN evaluation string
+
     Returns:
-        float: Centipawn score (positive = white advantage)
+    float: The encoded score
     """
+    if isinstance(eval_str, list) and all(isinstance(e, str) for e in eval_str):
+        eval_arr = []
+        for eval in eval_str:
+            eval_arr.append(_encode_score_helper(eval))
+        return eval_arr
+
+    if isinstance(eval_str, str):
+        return _encode_score_helper(eval_str)
+
+
+def _encode_score_helper(eval_str: str) -> float:
     if "#" in eval_str:
-        # Parse mate moves (always positive count)
-        moves_to_mate = abs(int(eval_str.strip("#")))
-        plies_to_mate = moves_to_mate * 2  # Convert to plies
-
-        if eval_str.startswith("#-"):
-            # Black can deliver mate
-            return -(MATE_SCORE - plies_to_mate)
-        else:
-            # White can deliver mate
-            return MATE_SCORE - plies_to_mate
+        moves = abs(int(eval_str.strip("#")))
+        plies = moves * 2
+        score = float(MATE_BASE - plies)
+        return score if not eval_str.startswith("#-") else -score
     else:
-        # Centipawn evaluation
-        return float(eval_str) * 100
+        return float(eval_str) * 100  # 0.24 -> 24.0 centipawns
 
-def scale_for_nn(input):
+
+def decode_score(score: float | torch.Tensor) -> str:
     """
-    Scales evaluations to [-1, 1] range.
-    Handles both torch.Tensor and scalar inputs.
+    Converts the centipawn score to pawn score and mate strings
+    - centipawn eval (24) => '0.24'
+    - mate eval (+9997) => '#3'
+    - mate against (-9997) => '#-3'
+
+    Args:
+    score (float | torch.Tensor): The centipawn score
+
+    Returns:
+    str: The decoded score
     """
-    MATE_THRESHOLD = 30000
-    MATE_SCORE = 32000
-    POSITIONAL_SCALE = 0.9375 / MATE_THRESHOLD
-
-    if isinstance(input, torch.Tensor):
-        # Tensor case
-        abs_evals = torch.abs(input)
-        is_mate = abs_evals > MATE_THRESHOLD
-        sign = torch.sign(input)
-
-        positional = input * POSITIONAL_SCALE
-
-        plies = MATE_SCORE - abs_evals
-        log_term = torch.log10(plies + 1.0) / 10.0
-        mate = sign * (0.9375 + (0.0625 - log_term))
-
-        return torch.where(is_mate, mate, positional)
-
-    elif isinstance(input, (float, int)):
-        # Scalar case
-        abs_score = abs(input)
-        sign = 1 if input >= 0 else -1
-
-        if abs_score <= MATE_THRESHOLD:
-            return input * POSITIONAL_SCALE
-        else:
-            plies = MATE_SCORE - abs_score
-            log_term = math.log10(plies + 1) / 10.0
-            return sign * (0.9375 + (0.0625 - log_term))
-
-    else:
-        raise TypeError("Input must be torch.Tensor or scalar (float/int)")
-
-def decode_nn_output(input):
-    """
-    Converts scaled values back to evaluation strings.
-    For tensors: returns list of strings
-    For scalars: returns single string
-    """
-    MATE_THRESHOLD_SCALED = 0.9375
-
-    if isinstance(input, torch.Tensor):
-        # Tensor case - convert to numpy first
-        abs_scaled = torch.abs(input)
-        sign = torch.sign(input)
-
+    MATE_THRESHOLD = 9900
+    if isinstance(score, torch.Tensor):
+        abs_score = torch.abs(score.clone())
         # Masks
-        below_mask = abs_scaled <= MATE_THRESHOLD_SCALED
-        above_mask = abs_scaled > MATE_THRESHOLD_SCALED
+        below_mask = abs_score < MATE_THRESHOLD
+        above_mask = abs_score >= MATE_THRESHOLD
 
-        # Process below mate (not in mate zone)
-        below_mate = input[below_mask] * (30000 / (0.9375 * 100))
+        below_mate = score[below_mask].clone() / 100
         below_strs = [f"{v.item():.2f}" for v in below_mate]
 
-        # Process forced mate (in mate zone)
-        forced_mate = abs_scaled[above_mask]
+        sign = torch.sign(score)
         forced_signs = sign[above_mask]
-
-        log_term = 0.0625 - (forced_mate - 0.9375)
-        plies = torch.round(10 ** (log_term * 10) - 1).to(torch.int32)
-        moves = (plies + 1) // 2
-
+        forced_mate_plies = MATE_BASE - abs_score[above_mask].clone().int()
+        moves = (forced_mate_plies + 1) // 2
         move_strs = []
         for s, m in zip(forced_signs, moves):
             move_strs.append(f"#{m.item()}" if s > 0 else f"#-{m.item()}")
-
-        # Reconstruct the full list preserving original order
         final_output = []
         below_idx = 0
         above_idx = 0
@@ -111,28 +82,17 @@ def decode_nn_output(input):
                 above_idx += 1
         return final_output
 
-    elif isinstance(input, (float, int)):
-        # Scalar case
-        return _decode_single(input)
+    elif isinstance(score, float):
+        abs_score = abs(score)
 
-    else:
-        raise TypeError("Input must be torch.Tensor or scalar (float/int)")
-
-
-def _decode_single(scaled: float) -> str:
-    """Helper function for single value decoding"""
-    MATE_THRESHOLD_SCALED = 0.9375
-    abs_scaled = abs(scaled)
-    sign = 1 if scaled > 0 else -1
-
-    if abs_scaled <= MATE_THRESHOLD_SCALED:
-        cp = round(scaled * (30000 / 0.9375))
-        return str(cp/100)
-    else:
-        log_term = 0.0625 - (abs_scaled - 0.9375)
-        plies = round(10 ** (log_term * 10) - 1)
-        moves = (plies + 1) // 2
-        return f"#{moves}" if sign > 0 else f"#-{moves}"
+        if abs_score < 1000:
+            return f"{score / 100:.2f}"
+        elif abs_score >= 9900:
+            plies = MATE_BASE - int(abs_score)
+            moves = (plies + 1) // 2
+            return f"#-{moves}" if score < 0 else f"#{moves}"
+        else:
+            return f"{score / 100:.2f}"  # handle fuzzy zone if needed
 
 def format_time(seconds):
     """Convert seconds into hours, minutes, and seconds format."""
