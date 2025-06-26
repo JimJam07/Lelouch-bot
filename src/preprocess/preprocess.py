@@ -9,21 +9,24 @@ import re
 
 from src.utils.utils import encode_score, format_time
 
+
 class Preprocess:
     """
     Preprocess the pgn file and convert it to NN friendly list[list]
     """
+
     def __init__(self, path):
         self.path = path
         self.gamesList = []
 
-    def preprocess(self, limit_games=None)->list:
+    def preprocess(self, limit_games=None):
         """
         the main pre-process function - convert the pgn file to NN friendly list
         Args:
             limit_games (optional): limits the number of processed games. Defaults to None
         Returns:
-            preprocessed_games (list): list of preprocessed games, list[0]->evals, list[1]->board tensor
+            state (torch.tensor): the processed board state for each position
+            evaluation (torch.tensor): the evaluations for each position
         """
         start_time = time.time()  # Start timing
         with open(self.path) as f:
@@ -41,7 +44,8 @@ class Preprocess:
             np.random.shuffle(self.gamesList)
             self.gamesList = self.gamesList[:limit_games]
 
-        preprocessed_games = []
+        pos_states = []
+        pos_evals = []
         # create the evaluation and board tensor
         for game in tqdm(self.gamesList, desc="Processing Games", unit="game"):
             board = game.board()
@@ -53,14 +57,15 @@ class Preprocess:
                 eval_match = eval_pattern.search(comment)
                 eval = eval_match.group(1) if eval_match else None
                 if eval is not None:
-                    preprocessed_games.append([encode_score(eval), tensor])
+                    pos_evals.append(encode_score(eval))
+                    pos_states.append(tensor)
 
         end_time = time.time()
         total_time = end_time - start_time
         formatted_time = format_time(total_time)
 
         print(f"Time taken: {formatted_time}")
-        return preprocessed_games
+        return torch.stack(pos_states), torch.tensor(pos_evals, dtype=torch.float32).unsqueeze(1)
 
     def board_to_stockfish_tensor(self, board):
         """
@@ -73,7 +78,7 @@ class Preprocess:
             chess.ROOK: 3, chess.QUEEN: 4, chess.KING: 5
         }
 
-        state_tensor = np.zeros((19, 8, 8), dtype=np.float32)
+        state_tensor = np.zeros((17, 8, 8), dtype=np.float32)
 
         # **1. Piece Positions (Planes 0-11)**
         for square, piece in board.piece_map().items():
@@ -92,6 +97,4 @@ class Preprocess:
         state_tensor[15, :, :] = float(bool(castling_rights & chess.BB_H8))  # Black kingside
         state_tensor[16, :, :] = float(bool(castling_rights & chess.BB_A8))  # Black queenside
 
-
         return torch.from_numpy(state_tensor)
-

@@ -178,6 +178,9 @@ backup/
 dataset/
 combined_games.pgn
 
+# save files
+save-points/
+
 # Other files
 .idea/
 .DS_Store
